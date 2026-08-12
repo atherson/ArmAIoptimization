@@ -30,7 +30,7 @@ A high‑performance C++ inference server for LLMs, optimised for Armv9‑A clou
 ---
 
 ## Key Features
-- **100% C++ Backend** – No Python, no Node.js; pure C++17 for maximum performance and minimal overhead.
+- **100% C++ Backend** – Pure C++17 for maximum performance and minimal overhead.
 - **KleidiAI Optimisations** – Explicitly enables Armv9‑A micro‑kernels (I8MM, DOTPROD) for accelerated matrix multiplication and inference.
 - **OpenAI‑Compatible API** – Supports `/v1/chat/completions` with both non‑streaming and streaming (SSE) responses. CORS headers are included for web clients.
 - **Built‑in Benchmarking** – Measures Time‑To‑First‑Token (TTFT), tokens per second, and peak memory footprint using `<chrono>`.
@@ -89,25 +89,13 @@ Benchmarks were run on an AWS Graviton4 instance (8 vCPUs, 32 GB RAM) with a `Ll
 For a fully automated setup on an Ubuntu 24.04 Arm instance, clone the repository and run the provided script:
 
 ```bash
-git clone https://github.com/yourusername/arm-ai-challenge.git
-cd arm-ai-challenge
+#1. Cloning the repository
+
+git clone https://github.com/atherson/aiOptimization.git
+cd aiOptimization
 ./setup_arm.sh
 
----
-
-## Manual Build (Any Linux)
-
-If you prefer to build manually, or are not on Ubuntu, follow these steps:
-
-```bash
-# 1. Install dependencies (example for Arch Linux)
-sudo pacman -S base-devel cmake git gcc g++ curl
-
-# 2. Clone the repository
-git clone https://github.com/yourusername/arm-ai-challenge.git
-cd arm-ai-challenge
-
-# 3. Create build directory and configure CMake
+# 2. Create build directory and configure CMake
 mkdir build && cd build
 cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
@@ -127,17 +115,20 @@ cmake .. \
     -DLLAMA_BUILD_EXAMPLES=OFF \
     -DLLAMA_BUILD_SERVER=OFF
 
-# 4. Build (use all cores)
+# 3. Build (use all cores)
 make -j$(nproc)
 
-# 5. (Optional) Link compile_commands.json for LSP
+# 4. (Optional) Link compile_commands.json for LSP
 ln -sf build/compile_commands.json .
+
+```
 
 ---
 
 ## Usage
 
 ### Starting the Server
+
 ```bash
 ./build/arm-ai-server -m /path/to/model.gguf -p 8080 -c 4096 -t 4
 ```
