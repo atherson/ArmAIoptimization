@@ -23,7 +23,6 @@ void print_usage(const char* program_name) {
 }
 
 int main(int argc, char* argv[]) {
-    // Parse command line arguments
     std::string model_path;
     int port = 8080;
     int n_ctx = 4096;
@@ -51,7 +50,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Set up signal handling
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
@@ -63,7 +61,6 @@ int main(int argc, char* argv[]) {
     std::cout << "  Threads: " << (n_threads > 0 ? std::to_string(n_threads) : "auto") << std::endl;
     std::cout << std::endl;
 
-    // Create and start server
     arm_ai::AIServer server;
     
     if (!server.start(model_path, port, n_ctx, n_threads)) {
@@ -79,7 +76,6 @@ int main(int argc, char* argv[]) {
     std::cout << std::endl;
     std::cout << "Press Ctrl+C to stop..." << std::endl;
 
-    // Wait for shutdown signal
     while (!shutdown_flag) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }

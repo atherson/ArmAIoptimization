@@ -31,7 +31,7 @@ TEST_F(InferenceEngineTest, ChatCompletion) {
     ChatRequest request;
     request.messages.push_back({"user", "What is 2+2?"});
     request.max_tokens = 50;
-    request.temperature = 0.0f;  // Deterministic
+    request.temperature = 0.0f;  
     
     auto response = engine.chat_completion(request);
     
@@ -97,7 +97,6 @@ protected:
             GTEST_SKIP() << "Failed to start server";
         }
         
-        // Give server time to start
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     
@@ -122,7 +121,6 @@ TEST_F(InferenceEngineTest, MemoryTracking) {
     size_t initial_memory = engine.get_peak_memory();
     EXPECT_GT(initial_memory, 0);
     
-    // Run inference and check memory doesn't explode
     ChatRequest request;
     request.messages.push_back({"user", "Tell me a joke"});
     request.max_tokens = 30;
@@ -131,7 +129,6 @@ TEST_F(InferenceEngineTest, MemoryTracking) {
     auto response = engine.chat_completion(request);
     size_t after_memory = engine.get_peak_memory();
     
-    // Memory should be reasonable (not 10x)
     EXPECT_LT(after_memory, initial_memory * 3);
 }
 

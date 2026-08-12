@@ -35,7 +35,7 @@ struct InferenceStats {
 
 struct ChatRequest {
     std::string model;
-    std::vector<std::pair<std::string, std::string>> messages;  // role, content
+    std::vector<std::pair<std::string, std::string>> messages; 
     float temperature = 0.8f;
     float top_p = 0.95f;
     int max_tokens = 1024;
@@ -63,17 +63,12 @@ public:
     InferenceEngine();
     ~InferenceEngine();
 
-    // Load a model from a GGUF file
-    bool load_model(const std::string& model_path, int n_ctx = 4096, 
-                    int n_threads = -1, int n_gpu_layers = 0);
+    bool load_model(const std::string& model_path, int n_ctx = 4096, int n_threads = -1, int n_gpu_layers = 0);
 
-    // Check if a model is loaded
     bool is_loaded() const { return model_ != nullptr && ctx_ != nullptr; }
 
-    // Get model name
     std::string get_model_name() const { return model_name_; }
 
-    // Perform chat completion (non-streaming)
     ChatResponse chat_completion(const ChatRequest& request);
 
     void chat_completion_stream(
@@ -81,24 +76,17 @@ public:
         std::function<void(const std::string&, bool, bool, const InferenceStats&)> callback
     );
 
-    // Get peak memory usage in bytes
     size_t get_peak_memory() const;
 
 private:
-    // Tokenize a string
     std::vector<llama_token> tokenize(const std::string& text, bool add_bos = true);
 
-    // Detokenize tokens to string
     std::string detokenize(const std::vector<llama_token>& tokens);
 
-    // Apply chat template
     std::string apply_chat_template(const std::vector<std::pair<std::string, std::string>>& messages);
 
-    // Build inference batch
-    llama_batch build_batch(const std::vector<llama_token>& tokens, 
-                            int n_past, int seq_id);
+    llama_batch build_batch(const std::vector<llama_token>& tokens, int n_past, int seq_id);
 
-    // Sampling helpers
     llama_token sample_token(float temperature, float top_p, float top_k = 40.0f);
 
 private:
@@ -113,7 +101,6 @@ private:
     mutable std::mutex mutex_;
     std::atomic<size_t> peak_memory_{0};
 
-    // Cache for the last tokenization to avoid re-tokenizing
     std::vector<llama_token> cached_tokens_;
     std::string cached_text_;
 };

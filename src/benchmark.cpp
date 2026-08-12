@@ -32,9 +32,9 @@ struct BenchmarkConfig {
 };
 
 struct BenchmarkResult {
-    double ttft_ms;                    // Time to first token (ms)
-    double tokens_per_second;          // Generation throughput
-    double prompt_processing_tps;      // Prompt processing tokens/sec
+    double ttft_ms;                   
+    double tokens_per_second;         
+    double prompt_processing_tps;     
     size_t prompt_tokens;
     size_t generated_tokens;
    size_t peak_memory_mb;
@@ -97,7 +97,7 @@ public:
     BenchmarkSummary run() {
         BenchmarkSummary summary;
         
-        std::cout << "\n=== Arm AI Benchmark ===" << std::endl;
+        std::cout << "\n== Arm AI Benchmark ==" << std::endl;
         std::cout << "Model: " << config_.model_path << std::endl;
         std::cout << "Runs: " << config_.n_benchmark_runs << " (warmup: " 
                   << config_.n_warmup_runs << ")" << std::endl;
@@ -115,7 +115,6 @@ public:
         std::cout << "Model loaded: " << engine.get_model_name() << std::endl;
         std::cout << std::endl;
         
-        // Warmup runs
         for (int i = 0; i < config_.n_warmup_runs; i++) {
             std::cout << "Warmup " << (i + 1) << "/" << config_.n_warmup_runs << "... " << std::flush;
             run_single(engine, config_.prompts[0], true);
@@ -123,7 +122,6 @@ public:
         }
         std::cout << std::endl;
         
-        // Benchmark runs across all prompts
         size_t total_runs = config_.n_benchmark_runs * config_.prompts.size();
         size_t run_count = 0;
         
@@ -182,7 +180,7 @@ private:
 
 
 void print_summary(const BenchmarkSummary& summary) {
-    std::cout << "=== Benchmark Summary ===" << std::endl;
+    std::cout << "== Benchmark Summary ==" << std::endl;
     std::cout << "Runs: " << summary.runs.size() << std::endl;
     std::cout << std::endl;
     
@@ -209,7 +207,6 @@ int main(int argc, char* argv[]) {
     BenchmarkConfig config;
     config.model_path = "models/model.gguf";
     
-    // Parse arguments
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "-m" || arg == "--model") {
