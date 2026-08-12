@@ -1,4 +1,3 @@
-
 # Arm AI Optimization Challenge 2026 – Track 2 (Cloud AI)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -66,7 +65,7 @@ Benchmarks were run on an AWS Graviton4 instance (8 vCPUs, 32 GB RAM) with a `Ll
 | **Model Speed** | Leverages KleidiAI micro‑kernels for Armv9’s I8MM and DOTPROD instructions, accelerating GEMM operations. | Achieves 1.6–2.0× speedup over standard NEON; 23.8 tok/s vs ~14 tok/s without KleidiAI. |
 | **Inference Server Speed** | Lightweight HTTP server (cpp‑httplib) with minimal overhead; batched prefill and efficient KV caching reduce latency. | HTTP overhead <50 µs per request; sustains 100+ concurrent requests with <5% latency degradation. |
 | **Developer Experience** | `compile_commands.json` for instant LSP; setup script automates 12+ steps; clear README and modular code. | Setup time from clone to running server: ~2 minutes. Codebase ~400 LOC for inference + server. |
-| **Arm‑specific Optimisation** | Build exclusively targets Armv9‑A with `-DGGML_CPU_ARM_ARCH=armv9-a+i8mm+dotprod`; all x86 code paths are disabled. | Native Arm binary runs on Graviton3/4, Azure Cobalt, etc.; no x86 emulation. |
+| **Arm‑specific Optimisation** | Build exclusively targets Armv9‑A with  `-DGGML_CPU_ARM_ARCH=armv9-a+i8mm+dotprod`; all x86 code paths are disabled. | Native Arm binary runs on Graviton3/4, Azure Cobalt, etc.; no x86 emulation. |
 
 ---
 
