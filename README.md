@@ -7,8 +7,6 @@
 
 A high‑performance C++ inference server for LLMs, optimised for Armv9‑A cloud instances using KleidiAI, exposing an OpenAI‑compatible REST API.
 
-![Architecture Diagram](https://via.placeholder.com/800x400?text=Architecture+Diagram)
-
 ## Table of Contents
 - [Key Features](#key-features)
 - [Performance Benchmarks](#performance-benchmarks)
