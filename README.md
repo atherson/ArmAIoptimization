@@ -90,7 +90,7 @@ For a fully automated setup on an Ubuntu 24.04 Arm instance, clone the repositor
 ```bash
 #1. Cloning the repository
 
-git clone https://github.com/atherson/ArmAIptimization.git
+git clone https://github.com/atherson/ArmAIoptimization.git
 
 cd ArmAIoptimization
 
