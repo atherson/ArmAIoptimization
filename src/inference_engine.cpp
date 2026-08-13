@@ -12,8 +12,6 @@
 
 namespace arm_ai {
 
-// RAII helpers for llama types
-
 InferenceEngine::InferenceEngine() {
     llama_backend_init();
 }
@@ -22,15 +20,12 @@ InferenceEngine::~InferenceEngine() {
     llama_backend_free();
 }
 
-// Model loading
-
 bool InferenceEngine::load_model(const std::string& model_path, int n_ctx,
                                   int n_threads, int n_gpu_layers) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     ctx_.reset();
     model_.reset();
-    sampler_.reset();
 
     n_ctx_ = n_ctx;
     n_threads_ = (n_threads <= 0) ? static_cast<int>(std::thread::hardware_concurrency()) : n_threads;
@@ -65,27 +60,14 @@ bool InferenceEngine::load_model(const std::string& model_path, int n_ctx,
         return false;
     }
 
-    // sampler
-    llama_sampler_chain_params sampler_params = llama_sampler_chain_default_params();
-    sampler_.reset(llama_sampler_chain_init(sampler_params));
-    llama_sampler_chain_add(sampler_.get(), llama_sampler_init_temp(0.8f));
-    llama_sampler_chain_add(sampler_.get(), llama_sampler_init_top_k(40));
-    llama_sampler_chain_add(sampler_.get(), llama_sampler_init_top_p(0.95f, 1));
-    llama_sampler_chain_add(sampler_.get(), llama_sampler_init_typical(1.0f, 1));
-    llama_sampler_chain_add(sampler_.get(), llama_sampler_init_min_p(0.05f, 1));
-    llama_sampler_chain_add(sampler_.get(), llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
-
     peak_memory_ = 0;
     return true;
 }
 
-// Tokenization using public API
-
 std::vector<llama_token> InferenceEngine::tokenize(const std::string& text, bool add_bos) {
-    std::lock_guard<std::mutex> lock(mutex_);
     if (!model_) return {};
 
-    std::vector<llama_token> tokens(text.length() + 1);  // reserve
+    std::vector<llama_token> tokens(text.length() + 1); 
     int n_tokens = llama_tokenize(model_.get(), text.c_str(), text.length(),
                                   tokens.data(), tokens.size(), add_bos, false);
     if (n_tokens < 0) return {};
@@ -94,7 +76,6 @@ std::vector<llama_token> InferenceEngine::tokenize(const std::string& text, bool
 }
 
 std::string InferenceEngine::detokenize(const std::vector<llama_token>& tokens) {
-    std::lock_guard<std::mutex> lock(mutex_);
     if (!ctx_) return "";
 
     std::string result;
@@ -108,24 +89,23 @@ std::string InferenceEngine::detokenize(const std::vector<llama_token>& tokens) 
     return result;
 }
 
-// Chat template using public API
-
 std::string InferenceEngine::apply_chat_template(
     const std::vector<std::pair<std::string, std::string>>& messages) {
 
-    // Convert to the format expected by llama_chat_apply_template
     std::vector<llama_chat_message> chat;
     chat.reserve(messages.size());
-    // We need to store strings to keep pointers valid
+    
     std::vector<std::string> roles;
     std::vector<std::string> contents;
+    roles.reserve(messages.size());
+    contents.reserve(messages.size());
+    
     for (const auto& [role, content] : messages) {
         roles.push_back(role);
         contents.push_back(content);
         chat.push_back({roles.back().c_str(), contents.back().c_str()});
     }
 
-    // Get the required buffer size
     int length = llama_chat_apply_template(model_.get(), nullptr, chat.data(), chat.size(),
                                            false, nullptr, 0);
     if (length < 0) return "";
@@ -137,8 +117,6 @@ std::string InferenceEngine::apply_chat_template(
     result.resize(written);
     return result;
 }
-
-// Batch building
 
 llama_batch InferenceEngine::build_batch(const std::vector<llama_token>& tokens,
                                           int n_past, int seq_id) {
@@ -153,28 +131,12 @@ llama_batch InferenceEngine::build_batch(const std::vector<llama_token>& tokens,
     return batch;
 }
 
-// Sampling
-
-llama_token InferenceEngine::sample_token(float temperature, float top_p, float top_k) {
-    if (!sampler_) return llama_token_nl;
-
-    // Update sampler parameters (re‑create)
-    llama_sampler_chain_params sampler_params = llama_sampler_chain_default_params();
-    llama_sampler* new_sampler = llama_sampler_chain_init(sampler_params);
-    llama_sampler_chain_add(new_sampler, llama_sampler_init_temp(temperature));
-    llama_sampler_chain_add(new_sampler, llama_sampler_init_top_k(static_cast<int>(top_k)));
-    llama_sampler_chain_add(new_sampler, llama_sampler_init_top_p(top_p, 1));
-    llama_sampler_chain_add(new_sampler, llama_sampler_init_typical(1.0f, 1));
-    llama_sampler_chain_add(new_sampler, llama_sampler_init_min_p(0.05f, 1));
-    llama_sampler_chain_add(new_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
-    sampler_.reset(new_sampler);
-
-    llama_token token = llama_sampler_sample(sampler_.get(), ctx_.get(), -1);
-    llama_sampler_accept(sampler_.get(), token);
+llama_token InferenceEngine::sample_token(llama_sampler* sampler) {
+    if (!sampler) return llama_token_nl;
+    llama_token token = llama_sampler_sample(sampler, ctx_.get(), -1);
+    llama_sampler_accept(sampler, token);
     return token;
 }
-
-// Chat completion
 
 ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
     auto start_total = std::chrono::steady_clock::now();
@@ -185,10 +147,8 @@ ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
         throw std::runtime_error("Model not loaded");
     }
 
-    // 1. Build prompt via chat template
     std::string prompt = apply_chat_template(request.messages);
 
-    // 2. Tokenize
     auto start_prompt = std::chrono::steady_clock::now();
     std::vector<llama_token> prompt_tokens = tokenize(prompt, true);
     stats.prompt_tokens = prompt_tokens.size();
@@ -196,7 +156,6 @@ ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
     stats.prompt_processing_time = std::chrono::duration_cast<std::chrono::microseconds>(
         end_prompt - start_prompt);
 
-    // 3. Prefill
     llama_batch batch = build_batch(prompt_tokens, 0, 0);
     auto start_prefill = std::chrono::steady_clock::now();
     if (llama_decode(ctx_.get(), batch) != 0) {
@@ -208,15 +167,29 @@ ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
         end_prefill - start_prefill);
     llama_batch_free(batch);
 
-    // 4. Generation loop
+    // Initialize the sampler purely for this request lifecycle
+    llama_sampler_chain_params sampler_params = llama_sampler_chain_default_params();
+    std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)> sampler(
+        llama_sampler_chain_init(sampler_params), llama_sampler_free);
+        
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_temp(request.temperature));
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_top_k(40));
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_top_p(request.top_p, 1));
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_typical(1.0f, 1));
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_min_p(0.05f, 1));
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+
     std::vector<llama_token> generated_tokens;
     generated_tokens.reserve(request.max_tokens);
     int n_past = prompt_tokens.size();
     bool first_token = true;
     auto first_token_time = std::chrono::steady_clock::now();
 
+    // Optimize single token decodes with a reusable batch
+    llama_batch decode_batch = llama_batch_init(1, 0, 1);
+
     for (int i = 0; i < request.max_tokens; i++) {
-        llama_token token = sample_token(request.temperature, request.top_p);
+        llama_token token = sample_token(sampler.get());
         if (token == llama_token_eos(model_.get())) break;
 
         generated_tokens.push_back(token);
@@ -227,16 +200,19 @@ ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
             first_token = false;
         }
 
-        // Decode next token
-        std::vector<llama_token> single_token = {token};
-        llama_batch next_batch = build_batch(single_token, n_past, 0);
-        if (llama_decode(ctx_.get(), next_batch) != 0) {
-            llama_batch_free(next_batch);
+        decode_batch.token[0] = token;
+        decode_batch.pos[0] = n_past;
+        decode_batch.seq_id[0] = 0;
+        decode_batch.logits[0] = true;
+        decode_batch.n_tokens = 1;
+
+        if (llama_decode(ctx_.get(), decode_batch) != 0) {
             break;
         }
-        llama_batch_free(next_batch);
         n_past += 1;
     }
+
+    llama_batch_free(decode_batch);
 
     auto end_total = std::chrono::steady_clock::now();
     stats.total_inference_time = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -262,8 +238,6 @@ ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
     peak_memory_ = std::max(peak_memory_.load(), get_peak_memory());
     return response;
 }
-
-// Streaming
 
 void InferenceEngine::chat_completion_stream(
     const ChatRequest& request,
@@ -299,13 +273,26 @@ void InferenceEngine::chat_completion_stream(
         end_prefill - start_prefill);
     llama_batch_free(batch);
 
+    llama_sampler_chain_params sampler_params = llama_sampler_chain_default_params();
+    std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)> sampler(
+        llama_sampler_chain_init(sampler_params), llama_sampler_free);
+        
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_temp(request.temperature));
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_top_k(40));
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_top_p(request.top_p, 1));
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_typical(1.0f, 1));
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_min_p(0.05f, 1));
+    llama_sampler_chain_add(sampler.get(), llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+
     int n_past = prompt_tokens.size();
     bool first_token = true;
     auto first_token_time = std::chrono::steady_clock::now();
     std::vector<llama_token> generated_tokens;
 
+    llama_batch decode_batch = llama_batch_init(1, 0, 1);
+
     for (int i = 0; i < request.max_tokens; i++) {
-        llama_token token = sample_token(request.temperature, request.top_p);
+        llama_token token = sample_token(sampler.get());
         if (token == llama_token_eos(model_.get())) break;
 
         generated_tokens.push_back(token);
@@ -323,15 +310,19 @@ void InferenceEngine::chat_completion_stream(
             std::chrono::steady_clock::now() - start_prefill);
         callback(token_text, (i == 0), false, stats);
 
-        std::vector<llama_token> single_token = {token};
-        llama_batch next_batch = build_batch(single_token, n_past, 0);
-        if (llama_decode(ctx_.get(), next_batch) != 0) {
-            llama_batch_free(next_batch);
+        decode_batch.token[0] = token;
+        decode_batch.pos[0] = n_past;
+        decode_batch.seq_id[0] = 0;
+        decode_batch.logits[0] = true;
+        decode_batch.n_tokens = 1;
+
+        if (llama_decode(ctx_.get(), decode_batch) != 0) {
             break;
         }
-        llama_batch_free(next_batch);
         n_past += 1;
     }
+
+    llama_batch_free(decode_batch);
 
     stats.total_inference_time = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - start_prefill);
@@ -339,8 +330,6 @@ void InferenceEngine::chat_completion_stream(
     peak_memory_ = std::max(peak_memory_.load(), get_peak_memory());
     callback("", false, true, stats);
 }
-
-// Memory
 
 size_t InferenceEngine::get_peak_memory() const {
     if (ctx_) {

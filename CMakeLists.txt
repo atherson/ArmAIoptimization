@@ -5,14 +5,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Apply global optimization flags
+add_compile_options(-O3 -flto)
+
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_CPU_ARM_ARCH "armv9-a+i8mm+dotprod" CACHE STRING "" FORCE)
 set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
 
-# Optional: additional Arm-specific flags
 set(GGML_CPU_AARCH64 ON CACHE BOOL "" FORCE)
 
-# Disable x86-specific optimizations
 set(GGML_AVX OFF CACHE BOOL "" FORCE)
 set(GGML_AVX2 OFF CACHE BOOL "" FORCE)
 set(GGML_AVX512 OFF CACHE BOOL "" FORCE)
@@ -77,11 +78,9 @@ target_link_libraries(arm-ai-server PRIVATE
     pthread
 )
 
-# Pass compile definitions for Arm optimization
 target_compile_definitions(arm-ai-server PRIVATE
     GGML_CPU_KLEIDIAI=1
 )
-
 
 add_executable(arm-ai-benchmark
     src/benchmark.cpp

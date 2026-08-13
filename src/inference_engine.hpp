@@ -87,12 +87,11 @@ private:
 
     llama_batch build_batch(const std::vector<llama_token>& tokens, int n_past, int seq_id);
 
-    llama_token sample_token(float temperature, float top_p, float top_k = 40.0f);
+    llama_token sample_token(llama_sampler* sampler);
 
 private:
     std::unique_ptr<llama_model, decltype(&llama_model_free)> model_{nullptr, llama_model_free};
     std::unique_ptr<llama_context, decltype(&llama_free)> ctx_{nullptr, llama_free};
-    std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)> sampler_{nullptr, llama_sampler_free};
 
     std::string model_name_;
     int n_ctx_ = 4096;
@@ -100,9 +99,6 @@ private:
     
     mutable std::mutex mutex_;
     std::atomic<size_t> peak_memory_{0};
-
-    std::vector<llama_token> cached_tokens_;
-    std::string cached_text_;
 };
 
-} 
+}
