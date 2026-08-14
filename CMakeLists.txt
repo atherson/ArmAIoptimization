@@ -5,38 +5,60 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Apply global optimization flags
+# Global optimisation flags
 add_compile_options(-O3 -flto)
 
+# -------------------------------------------------------------------
+# Arm architecture optimisations (also applied to your own source)
+# -------------------------------------------------------------------
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    # Use the same march that you set for GGML_CPU_ARM_ARCH, or a superset.
+    # The GGML_CPU_ARM_ARCH variable already passes -march to llama.cpp,
+    # but we want our own code (main, server, benchmark, tests) to benefit too.
+    add_compile_options(-march=armv9-a+sve2 -mtune=cortex-a710)
+endif()
+
+# -------------------------------------------------------------------
+# Configure llama.cpp for Arm with KleidiAI
+# -------------------------------------------------------------------
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_CPU_ARM_ARCH "armv9-a+sve+i8mm+dotprod" CACHE STRING "" FORCE)
 set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
-
 set(GGML_CPU_AARCH64 ON CACHE BOOL "" FORCE)
 
+# Disable x86-specific optimisations (they won't be used anyway)
 set(GGML_AVX OFF CACHE BOOL "" FORCE)
 set(GGML_AVX2 OFF CACHE BOOL "" FORCE)
 set(GGML_AVX512 OFF CACHE BOOL "" FORCE)
 set(GGML_FMA OFF CACHE BOOL "" FORCE)
 set(GGML_F16C OFF CACHE BOOL "" FORCE)
 
+# -------------------------------------------------------------------
+# Fetch llama.cpp (pinned to a specific commit/release)
+# -------------------------------------------------------------------
 include(FetchContent)
 
 FetchContent_Declare(
     llama.cpp
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
-    GIT_TAG origin/master  
+    # Pin to a stable version that includes the new sampler API (e.g., b3973)
+    # You can replace with a specific commit SHA if you prefer.
+    GIT_TAG b3973
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp
 )
 
+# Disable unnecessary parts of llama.cpp
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(LLAMA_CURL OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)  
+set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(llama.cpp)
 
+# -------------------------------------------------------------------
+# Other dependencies
+# -------------------------------------------------------------------
 FetchContent_Declare(
     httplib
     GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
@@ -59,11 +81,13 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+# -------------------------------------------------------------------
+# Main executable: arm-ai-server
+# -------------------------------------------------------------------
 add_executable(arm-ai-server
     src/main.cpp
     src/inference_engine.cpp
     src/server.cpp
-    
 )
 
 target_include_directories(arm-ai-server PRIVATE
@@ -80,10 +104,11 @@ target_link_libraries(arm-ai-server PRIVATE
     pthread
 )
 
-target_compile_definitions(arm-ai-server PRIVATE
-    GGML_CPU_KLEIDIAI=1
-)
+# KleidiAI is already enabled via cache variables; no need to redefine.
 
+# -------------------------------------------------------------------
+# Benchmark executable
+# -------------------------------------------------------------------
 add_executable(arm-ai-benchmark
     src/benchmark.cpp
     src/inference_engine.cpp
@@ -101,6 +126,9 @@ target_link_libraries(arm-ai-benchmark PRIVATE
     pthread
 )
 
+# -------------------------------------------------------------------
+# Test executable (using GoogleTest)
+# -------------------------------------------------------------------
 enable_testing()
 
 add_executable(arm-ai-tests

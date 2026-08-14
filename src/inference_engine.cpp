@@ -6,6 +6,7 @@
 #include <random>
 #include <chrono>
 #include <thread>
+#include <sys/resource.h>   // for getrusage
 
 namespace arm_ai {
 
@@ -19,7 +20,7 @@ InferenceEngine::InferenceEngine()
 InferenceEngine::~InferenceEngine() = default;
 
 // ---------------------------------------------------------------------
-// Model loading
+// Model loading – now uses llama_init_from_model (new API)
 // ---------------------------------------------------------------------
 bool InferenceEngine::load_model(const std::string& model_path,
                                  int n_ctx,
@@ -42,13 +43,13 @@ bool InferenceEngine::load_model(const std::string& model_path,
         return false;
     }
 
+    // ----- NEW: use llama_init_from_model -----
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = n_ctx;
     ctx_params.n_threads = (n_threads > 0) ? n_threads : std::thread::hardware_concurrency();
     ctx_params.n_threads_batch = ctx_params.n_threads;
 
-    // llama_new_context_with_model is deprecated but still works.
-    ctx_.reset(llama_new_context_with_model(model_.get(), ctx_params));
+    ctx_.reset(llama_init_from_model(model_.get(), ctx_params));   // new function
     if (!ctx_) {
         std::cerr << "Failed to create context" << std::endl;
         return false;
@@ -62,7 +63,7 @@ bool InferenceEngine::load_model(const std::string& model_path,
 }
 
 // ---------------------------------------------------------------------
-// Tokenization / Detokenization (using vocab)
+// Tokenization / Detokenization (unchanged)
 // ---------------------------------------------------------------------
 std::vector<llama_token> InferenceEngine::tokenize(const std::string& text, bool add_bos) {
     if (!vocab_) return {};
@@ -84,8 +85,7 @@ std::string InferenceEngine::detokenize(const std::vector<llama_token>& tokens) 
     if (!vocab_) return "";
 
     std::string result;
-    std::vector<char> buffer(16); // initial size
-
+    std::vector<char> buffer(16);
     for (const auto& token : tokens) {
         int n = llama_token_to_piece(vocab_, token, buffer.data(), buffer.size(), 0, true);
         if (n < 0) {
@@ -121,7 +121,7 @@ std::string InferenceEngine::apply_chat_template(const std::vector<std::pair<std
 }
 
 // ---------------------------------------------------------------------
-// Build batch
+// Build batch – with proper resource cleanup
 // ---------------------------------------------------------------------
 llama_batch InferenceEngine::build_batch(const std::vector<llama_token>& tokens,
                                          int n_past,
@@ -139,7 +139,34 @@ llama_batch InferenceEngine::build_batch(const std::vector<llama_token>& tokens,
 }
 
 // ---------------------------------------------------------------------
-// Non‑streaming generation (uses legacy sampling)
+// NEW: helper to create a sampler chain
+// ---------------------------------------------------------------------
+static llama_sampler* create_sampler(float temp, float top_p) {
+    // Build a simple chain: temperature + top_p + greedy (or mirostat)
+    auto chain_params = llama_sampler_chain_default_params();
+    llama_sampler* chain = llama_sampler_chain_init(chain_params);
+
+    // Add temperature sampler (if temp > 0)
+    if (temp > 0.0f) {
+        llama_sampler* temp_sampler = llama_sampler_init_temp(temp);
+        llama_sampler_chain_add(chain, temp_sampler);
+    }
+
+    // Add top_p sampler
+    if (top_p < 1.0f) {
+        llama_sampler* top_p_sampler = llama_sampler_init_top_p(top_p, 1);
+        llama_sampler_chain_add(chain, top_p_sampler);
+    }
+
+    // Add greedy (or you could use mirostat)
+    llama_sampler* greedy = llama_sampler_init_greedy();
+    llama_sampler_chain_add(chain, greedy);
+
+    return chain;
+}
+
+// ---------------------------------------------------------------------
+// Non‑streaming generation (uses new sampler API)
 // ---------------------------------------------------------------------
 ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
     ChatResponse response;
@@ -149,6 +176,9 @@ ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+
+    // Clear KV cache for a clean start
+    llama_kv_cache_clear(ctx_.get());
 
     std::string prompt = apply_chat_template(request.messages);
     if (prompt.empty()) {
@@ -179,28 +209,24 @@ ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
     n_past += tokens.size();
     llama_batch_free(batch);
 
-    // Prepare sampling parameters
-    llama_sampling_params sparams;
-    sparams.temp = request.temperature;
-    sparams.top_p = request.top_p;
-    sparams.penalty_last_n = 64;        // optional
-    sparams.penalty_repeat = 1.0f;      // no penalty
-    sparams.penalty_freq = 0.0f;
-    sparams.penalty_present = 0.0f;
-    sparams.mirostat = 0;               // disabled
-    sparams.mirostat_tau = 5.0f;
-    sparams.mirostat_eta = 0.1f;
+    // ----- NEW: create sampler -----
+    llama_sampler* sampler = create_sampler(request.temperature, request.top_p);
+    if (!sampler) {
+        std::cerr << "Failed to create sampler" << std::endl;
+        return response;
+    }
 
     std::vector<llama_token> generated_tokens;
     bool first_token = true;
     int remaining = request.max_tokens;
 
     while (remaining-- > 0) {
-        llama_token id = llama_sample_token(ctx_.get(), sparams);
+        llama_token id = llama_sampler_sample(sampler, ctx_.get(), -1, 0);
         if (llama_vocab_is_eog(vocab_, id)) break;
 
         generated_tokens.push_back(id);
 
+        // Decode the new token
         llama_batch single = llama_batch_init(1, 0, 1);
         single.token[0] = id;
         single.pos[0] = n_past;
@@ -224,6 +250,8 @@ ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
         }
     }
 
+    llama_sampler_free(sampler);   // free the sampler
+
     auto end_total = std::chrono::steady_clock::now();
     stats.total_inference_time = std::chrono::duration_cast<std::chrono::microseconds>(end_total - start_total);
     stats.generated_tokens = generated_tokens.size();
@@ -242,7 +270,7 @@ ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
 }
 
 // ---------------------------------------------------------------------
-// Streaming generation (uses legacy sampling)
+// Streaming generation (new sampler API)
 // ---------------------------------------------------------------------
 void InferenceEngine::chat_completion_stream(
     const ChatRequest& request,
@@ -254,6 +282,9 @@ void InferenceEngine::chat_completion_stream(
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+
+    // Clear KV cache per request
+    llama_kv_cache_clear(ctx_.get());
 
     std::string prompt = apply_chat_template(request.messages);
     if (prompt.empty()) {
@@ -287,25 +318,20 @@ void InferenceEngine::chat_completion_stream(
     n_past += tokens.size();
     llama_batch_free(batch);
 
-    // Sampling parameters
-    llama_sampling_params sparams;
-    sparams.temp = request.temperature;
-    sparams.top_p = request.top_p;
-    sparams.penalty_last_n = 64;
-    sparams.penalty_repeat = 1.0f;
-    sparams.penalty_freq = 0.0f;
-    sparams.penalty_present = 0.0f;
-    sparams.mirostat = 0;
-    sparams.mirostat_tau = 5.0f;
-    sparams.mirostat_eta = 0.1f;
+    // ----- NEW: create sampler -----
+    llama_sampler* sampler = create_sampler(request.temperature, request.top_p);
+    if (!sampler) {
+        std::cerr << "Failed to create sampler" << std::endl;
+        callback("", false, true, {});
+        return;
+    }
 
     bool first_token = true;
     int remaining = request.max_tokens;
-
-    std::vector<char> buffer(16); // for token-to-piece
+    std::vector<char> buffer(16);
 
     while (remaining-- > 0) {
-        llama_token id = llama_sample_token(ctx_.get(), sparams);
+        llama_token id = llama_sampler_sample(sampler, ctx_.get(), -1, 0);
         if (llama_vocab_is_eog(vocab_, id)) break;
 
         // Convert token to string
@@ -325,7 +351,7 @@ void InferenceEngine::chat_completion_stream(
             callback(piece, false, false, stats);
         }
 
-        // Decode the token to update context
+        // Decode the new token
         llama_batch single = llama_batch_init(1, 0, 1);
         single.token[0] = id;
         single.pos[0] = n_past;
@@ -343,18 +369,25 @@ void InferenceEngine::chat_completion_stream(
         llama_batch_free(single);
     }
 
+    llama_sampler_free(sampler);
+
     auto end_total = std::chrono::steady_clock::now();
     stats.total_inference_time = std::chrono::duration_cast<std::chrono::microseconds>(end_total - start_total);
-    stats.generated_tokens = n_past - tokens.size(); // approximate
+    stats.generated_tokens = n_past - tokens.size();
     peak_memory_ = std::max(peak_memory_.load(), get_peak_memory());
 
     callback("", false, true, stats);
 }
 
 // ---------------------------------------------------------------------
-// Peak memory (placeholder)
+// Peak memory (Linux/Unix)
 // ---------------------------------------------------------------------
 size_t InferenceEngine::get_peak_memory() const {
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        // On Linux, ru_maxrss is in kilobytes. Convert to bytes.
+        return static_cast<size_t>(usage.ru_maxrss) * 1024;
+    }
     return 0;
 }
 
