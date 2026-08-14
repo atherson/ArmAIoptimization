@@ -1,5 +1,4 @@
-#include <gtest/gtest.h>   
-
+#include <gtest/gtest.h>
 #include "inference_engine.hpp"
 
 #include <fstream>
@@ -24,7 +23,7 @@ protected:
 
 TEST_F(InferenceEngineTest, LoadModel) {
     InferenceEngine engine;
-    EXPECT_TRUE(engine.load_model(model_path_, 512, 1));
+    EXPECT_TRUE(engine.load_model(model_path_, 512, /*n_threads=*/1));
     EXPECT_TRUE(engine.is_loaded());
     EXPECT_FALSE(engine.get_model_name().empty());
 }
@@ -40,17 +39,19 @@ TEST_F(InferenceEngineTest, ChatCompletion) {
     ASSERT_TRUE(engine.load_model(model_path_, 512, 1));
 
     ChatRequest request;
+    // BUG 7 FIXED: ChatMessage struct doesn't exist; messages is
+    //   vector<pair<string,string>>, so use make_pair / brace init.
     request.messages.push_back({"user", "What is 2+2?"});
-    request.max_tokens = 50;
+    request.max_tokens  = 50;
     request.temperature = 0.0f;
 
     auto response = engine.chat_completion(request);
 
-    EXPECT_EQ(response.choices.size(), 1);
+    EXPECT_EQ(response.choices.size(), 1u);
     EXPECT_FALSE(response.choices[0].message.empty());
-    EXPECT_GT(response.stats.prompt_tokens, 0);
-    EXPECT_GT(response.stats.generated_tokens, 0);
-    EXPECT_GT(response.stats.tokens_per_second(), 0);
+    EXPECT_GT(response.stats.prompt_tokens,    0u);
+    EXPECT_GT(response.stats.generated_tokens, 0u);
+    EXPECT_GT(response.stats.tokens_per_second(), 0.0);
 }
 
 TEST_F(InferenceEngineTest, ChatCompletionStream) {
@@ -59,20 +60,21 @@ TEST_F(InferenceEngineTest, ChatCompletionStream) {
 
     ChatRequest request;
     request.messages.push_back({"user", "Say hello"});
-    request.max_tokens = 20;
+    request.max_tokens  = 20;
     request.temperature = 0.0f;
-    request.stream = true;
+    request.stream      = true;
 
     std::string accumulated;
     bool got_first_token = false;
-    bool got_final = false;
+    bool got_final       = false;
 
     engine.chat_completion_stream(
         request,
-        [&](const std::string& token, bool is_first, bool is_final, const InferenceStats&) {
-            if (is_first) got_first_token = true;
-            if (!is_final) accumulated += token;
-            if (is_final) got_final = true;
+        [&](const std::string& token, bool is_first, bool is_final,
+            const InferenceStats&) {
+            if (is_first)   got_first_token = true;
+            if (!is_final)  accumulated    += token;
+            if (is_final)   got_final       = true;
         }
     );
 
@@ -87,11 +89,11 @@ TEST_F(InferenceEngineTest, Tokenization) {
 
     ChatRequest request;
     request.messages.push_back({"user", "Hello world! This is a test."});
-    request.max_tokens = 10;
+    request.max_tokens  = 10;
     request.temperature = 0.0f;
 
     auto response = engine.chat_completion(request);
-    EXPECT_GT(response.stats.prompt_tokens, 0);
+    EXPECT_GT(response.stats.prompt_tokens, 0u);
 }
 
 TEST_F(InferenceEngineTest, MemoryTracking) {
@@ -99,16 +101,17 @@ TEST_F(InferenceEngineTest, MemoryTracking) {
     ASSERT_TRUE(engine.load_model(model_path_, 512, 1));
 
     size_t initial_memory = engine.get_peak_memory();
-    EXPECT_GT(initial_memory, 0);
+    EXPECT_GT(initial_memory, 0u);
 
     ChatRequest request;
     request.messages.push_back({"user", "Tell me a joke"});
-    request.max_tokens = 30;
+    request.max_tokens  = 30;
     request.temperature = 0.7f;
 
-    auto response = engine.chat_completion(request);
+    auto response       = engine.chat_completion(request);
     size_t after_memory = engine.get_peak_memory();
 
+    // Memory should not balloon more than 3× the model weight
     EXPECT_LT(after_memory, initial_memory * 3);
 }
 
@@ -116,10 +119,13 @@ TEST_F(InferenceEngineTest, ConcurrentRequests) {
     InferenceEngine engine;
     ASSERT_TRUE(engine.load_model(model_path_, 512, 1));
 
-    auto run_request = [&](int id) {
+    auto run_request = [&](int id) -> ChatResponse {
         ChatRequest request;
-        request.messages.push_back({"user", "What is " + std::to_string(id) + "+" + std::to_string(id) + "?"});
-        request.max_tokens = 20;
+        request.messages.push_back({
+            "user",
+            "What is " + std::to_string(id) + "+" + std::to_string(id) + "?"
+        });
+        request.max_tokens  = 20;
         request.temperature = 0.0f;
         return engine.chat_completion(request);
     };
@@ -132,10 +138,7 @@ TEST_F(InferenceEngineTest, ConcurrentRequests) {
             responses[i] = run_request(i);
         });
     }
-
-    for (auto& t : threads) {
-        t.join();
-    }
+    for (auto& t : threads) t.join();
 
     for (const auto& resp : responses) {
         EXPECT_FALSE(resp.choices.empty());
