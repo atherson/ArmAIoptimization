@@ -1,394 +1,225 @@
 #include "inference_engine.hpp"
 
 #include <llama.h>
+#include <ggml.h>
+
 #include <iostream>
-#include <algorithm>
-#include <random>
+#include <vector>
+#include <string>
 #include <chrono>
-#include <thread>
-#include <sys/resource.h>   // for getrusage
+#include <cmath>
+#include <algorithm>
+#include <stdexcept>
 
 namespace arm_ai {
 
-// ---------------------------------------------------------------------
-// Constructor / Destructor
-// ---------------------------------------------------------------------
-InferenceEngine::InferenceEngine()
-    : model_(nullptr, llama_model_free),
-      ctx_(nullptr, llama_free) {}
+InferenceEngine::InferenceEngine() = default;
 
-InferenceEngine::~InferenceEngine() = default;
+InferenceEngine::~InferenceEngine() {
+    cleanup();
+}
 
-// ---------------------------------------------------------------------
-// Model loading – now uses llama_init_from_model (new API)
-// ---------------------------------------------------------------------
-bool InferenceEngine::load_model(const std::string& model_path,
-                                 int n_ctx,
-                                 int n_threads,
-                                 int n_gpu_layers) {
-    if (is_loaded()) return true;
+void InferenceEngine::cleanup() {
+    if (sampler_) {
+        llama_sampler_free(sampler_);
+        sampler_ = nullptr;
+    }
+    ctx_.reset();
+    model_.reset();
+}
+
+bool InferenceEngine::load_model(const std::string& model_path, int n_ctx, int n_threads, int n_gpu_layers) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cleanup();
+
+    model_path_ = model_path;
 
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = n_gpu_layers;
 
-    model_.reset(llama_model_load_from_file(model_path.c_str(), model_params));
-    if (!model_) {
-        std::cerr << "Failed to load model: " << model_path << std::endl;
+    struct llama_model* model_ptr = llama_model_load_from_file(model_path.c_str(), model_params);
+    if (!model_ptr) {
+        std::cerr << "InferenceEngine: Failed to load model from " << model_path << std::endl;
         return false;
     }
+    model_ = std::unique_ptr<llama_model, decltype(&llama_model_free)>(model_ptr, &llama_model_free);
 
-    vocab_ = llama_model_get_vocab(model_.get());
-    if (!vocab_) {
-        std::cerr << "Failed to get vocabulary" << std::endl;
-        return false;
-    }
-
-    // ----- NEW: use llama_init_from_model -----
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = n_ctx;
-    ctx_params.n_threads = (n_threads > 0) ? n_threads : std::thread::hardware_concurrency();
+    ctx_params.n_threads = n_threads > 0 ? n_threads : std::thread::hardware_concurrency();
     ctx_params.n_threads_batch = ctx_params.n_threads;
 
-    ctx_.reset(llama_init_from_model(model_.get(), ctx_params));   // new function
-    if (!ctx_) {
-        std::cerr << "Failed to create context" << std::endl;
+    struct llama_context* ctx_ptr = llama_new_context_with_model(model_.get(), ctx_params);
+    if (!ctx_ptr) {
+        std::cerr << "InferenceEngine: Failed to create context." << std::endl;
         return false;
     }
+    ctx_ = std::unique_ptr<llama_context, decltype(&llama_free)>(ctx_ptr, &llama_free);
 
-    n_ctx_ = n_ctx;
-    n_threads_ = ctx_params.n_threads;
-    model_name_ = model_path;
+    // Initialize default sampler chain
+    auto sparams = llama_sampler_chain_default_params();
+    sampler_ = llama_sampler_chain_init(sparams);
+    llama_sampler_chain_add(sampler_, llama_sampler_init_greedy());
 
     return true;
 }
 
-// ---------------------------------------------------------------------
-// Tokenization / Detokenization (unchanged)
-// ---------------------------------------------------------------------
-std::vector<llama_token> InferenceEngine::tokenize(const std::string& text, bool add_bos) {
-    if (!vocab_) return {};
+bool InferenceEngine::is_loaded() const {
+    return model_ != nullptr && ctx_ != nullptr;
+}
 
-    std::vector<llama_token> tokens;
-    const int n_tokens = llama_tokenize(vocab_, text.c_str(), text.size(),
-                                        tokens.data(), tokens.size(), add_bos, false);
+std::string InferenceEngine::get_model_name() const {
+    if (!model_) return "";
+    char buf[256];
+    int len = llama_model_desc(model_.get(), buf, sizeof(buf));
+    return len > 0 ? std::string(buf, len) : "unknown";
+}
+
+size_t InferenceEngine::get_peak_memory() const {
+    if (!ctx_) return 0;
+    // Return approximate memory usage estimation or state tracking
+    return llama_get_model_size(model_.get());
+}
+
+ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ChatResponse response;
+    if (!is_loaded()) return response;
+
+    // Clear KV cache using modern seq_rm API
+    llama_kv_cache_seq_rm(ctx_.get(), -1, 0, -1);
+
+    const auto* vocab = llama_model_get_vocab(model_.get());
+
+    // Format prompt/messages
+    std::string prompt = "";
+    for (const auto& msg : request.messages) {
+        prompt += msg.role + ": " + msg.content + "\n";
+    }
+    prompt += "assistant: ";
+
+    std::vector<llama_token> tokens(prompt.size() + 3);
+    int n_tokens = llama_tokenize(vocab, prompt.data(), prompt.size(), tokens.data(), tokens.size(), true, true);
     if (n_tokens < 0) {
-        std::cerr << "Failed to tokenize" << std::endl;
-        return {};
+        tokens.resize(-n_tokens);
+        n_tokens = llama_tokenize(vocab, prompt.data(), prompt.size(), tokens.data(), tokens.size(), true, true);
     }
     tokens.resize(n_tokens);
-    llama_tokenize(vocab_, text.c_str(), text.size(),
-                   tokens.data(), tokens.size(), add_bos, false);
-    return tokens;
-}
 
-std::string InferenceEngine::detokenize(const std::vector<llama_token>& tokens) {
-    if (!vocab_) return "";
+    ChatResponseStats stats;
+    stats.prompt_tokens = n_tokens;
 
-    std::string result;
-    std::vector<char> buffer(16);
-    for (const auto& token : tokens) {
-        int n = llama_token_to_piece(vocab_, token, buffer.data(), buffer.size(), 0, true);
-        if (n < 0) {
-            buffer.resize(-n + 1);
-            n = llama_token_to_piece(vocab_, token, buffer.data(), buffer.size(), 0, true);
-        }
-        if (n > 0) {
-            result.append(buffer.data(), n);
-        }
-    }
-    return result;
-}
-
-// ---------------------------------------------------------------------
-// Chat template
-// ---------------------------------------------------------------------
-std::string InferenceEngine::apply_chat_template(const std::vector<std::pair<std::string, std::string>>& messages) {
-    if (!model_) return "";
-
-    std::vector<llama_chat_message> msgs;
-    msgs.reserve(messages.size());
-    for (const auto& [role, content] : messages) {
-        msgs.push_back({role.c_str(), content.c_str()});
-    }
-
-    int n = llama_chat_apply_template(nullptr, msgs.data(), msgs.size(), true, nullptr, 0);
-    if (n < 0) return "";
-    std::string buf(n + 1, '\0');
-    n = llama_chat_apply_template(nullptr, msgs.data(), msgs.size(), true, buf.data(), buf.size());
-    if (n < 0) return "";
-    buf.resize(n);
-    return buf;
-}
-
-// ---------------------------------------------------------------------
-// Build batch – with proper resource cleanup
-// ---------------------------------------------------------------------
-llama_batch InferenceEngine::build_batch(const std::vector<llama_token>& tokens,
-                                         int n_past,
-                                         int seq_id) {
-    llama_batch batch = llama_batch_init(tokens.size(), 0, 1);
-    for (size_t i = 0; i < tokens.size(); i++) {
-        batch.token[i] = tokens[i];
-        batch.pos[i] = n_past + i;
-        batch.seq_id[i][0] = seq_id;
-        batch.n_seq_id[i] = 1;
-        batch.logits[i] = (i == tokens.size() - 1);
-    }
-    batch.n_tokens = tokens.size();
-    return batch;
-}
-
-// ---------------------------------------------------------------------
-// NEW: helper to create a sampler chain
-// ---------------------------------------------------------------------
-static llama_sampler* create_sampler(float temp, float top_p) {
-    // Build a simple chain: temperature + top_p + greedy (or mirostat)
-    auto chain_params = llama_sampler_chain_default_params();
-    llama_sampler* chain = llama_sampler_chain_init(chain_params);
-
-    // Add temperature sampler (if temp > 0)
-    if (temp > 0.0f) {
-        llama_sampler* temp_sampler = llama_sampler_init_temp(temp);
-        llama_sampler_chain_add(chain, temp_sampler);
-    }
-
-    // Add top_p sampler
-    if (top_p < 1.0f) {
-        llama_sampler* top_p_sampler = llama_sampler_init_top_p(top_p, 1);
-        llama_sampler_chain_add(chain, top_p_sampler);
-    }
-
-    // Add greedy (or you could use mirostat)
-    llama_sampler* greedy = llama_sampler_init_greedy();
-    llama_sampler_chain_add(chain, greedy);
-
-    return chain;
-}
-
-// ---------------------------------------------------------------------
-// Non‑streaming generation (uses new sampler API)
-// ---------------------------------------------------------------------
-ChatResponse InferenceEngine::chat_completion(const ChatRequest& request) {
-    ChatResponse response;
-    if (!model_ || !ctx_ || !vocab_) {
-        std::cerr << "Model not loaded" << std::endl;
-        return response;
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    // Clear KV cache for a clean start
-    llama_kv_cache_clear(ctx_.get());
-
-    std::string prompt = apply_chat_template(request.messages);
-    if (prompt.empty()) {
-        std::cerr << "Failed to apply chat template" << std::endl;
-        return response;
-    }
-
-    auto tokens = tokenize(prompt, true);
-    if (tokens.empty()) {
-        std::cerr << "Tokenization failed" << std::endl;
-        return response;
-    }
-
-    InferenceStats stats;
-    stats.prompt_tokens = tokens.size();
-
-    auto start_total = std::chrono::steady_clock::now();
-    int n_past = 0;
-    llama_batch batch = build_batch(tokens, n_past, 0);
-    auto start_prompt = std::chrono::steady_clock::now();
+    llama_batch batch = llama_batch_get_one(tokens.data(), tokens.size());
     if (llama_decode(ctx_.get(), batch) != 0) {
-        std::cerr << "llama_decode failed" << std::endl;
-        llama_batch_free(batch);
-        return response;
-    }
-    auto end_prompt = std::chrono::steady_clock::now();
-    stats.prompt_processing_time = std::chrono::duration_cast<std::chrono::microseconds>(end_prompt - start_prompt);
-    n_past += tokens.size();
-    llama_batch_free(batch);
-
-    // ----- NEW: create sampler -----
-    llama_sampler* sampler = create_sampler(request.temperature, request.top_p);
-    if (!sampler) {
-        std::cerr << "Failed to create sampler" << std::endl;
+        std::cerr << "InferenceEngine: Failed to decode prompt batch." << std::endl;
         return response;
     }
 
-    std::vector<llama_token> generated_tokens;
-    bool first_token = true;
-    int remaining = request.max_tokens;
+    int generated = 0;
+    std::string completion_text = "";
+    auto start_time = std::chrono::high_resolution_clock::now();
 
-    while (remaining-- > 0) {
-        llama_token id = llama_sampler_sample(sampler, ctx_.get(), -1, 0);
-        if (llama_vocab_is_eog(vocab_, id)) break;
-
-        generated_tokens.push_back(id);
-
-        // Decode the new token
-        llama_batch single = llama_batch_init(1, 0, 1);
-        single.token[0] = id;
-        single.pos[0] = n_past;
-        single.seq_id[0][0] = 0;
-        single.n_seq_id[0] = 1;
-        single.logits[0] = true;
-        single.n_tokens = 1;
-
-        if (llama_decode(ctx_.get(), single) != 0) {
-            std::cerr << "llama_decode failed during generation" << std::endl;
-            llama_batch_free(single);
+    while (generated < request.max_tokens) {
+        llama_token id = llama_sampler_sample(sampler_, ctx_.get(), -1);
+        
+        if (llama_vocab_is_eog(vocab, id)) {
             break;
         }
-        n_past++;
-        llama_batch_free(single);
 
-        if (first_token) {
-            stats.time_to_first_token = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - start_prompt);
-            first_token = false;
+        char buf[128];
+        int n = llama_token_to_piece(vocab, id, buf, sizeof(buf), 0, true);
+        if (n > 0) {
+            completion_text.append(buf, n);
+        }
+
+        generated++;
+        stats.generated_tokens++;
+
+        batch = llama_batch_get_one(&id, 1);
+        if (llama_decode(ctx_.get(), batch) != 0) {
+            break;
         }
     }
 
-    llama_sampler_free(sampler);   // free the sampler
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end_time - start_time;
+    stats.total_time_ms = elapsed.count() * 1000.0;
 
-    auto end_total = std::chrono::steady_clock::now();
-    stats.total_inference_time = std::chrono::duration_cast<std::chrono::microseconds>(end_total - start_total);
-    stats.generated_tokens = generated_tokens.size();
-
-    response.id = "chatcmpl-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-    response.model = model_name_;
-    if (!generated_tokens.empty()) {
-        response.choices.emplace_back(ChatChoice{0, detokenize(generated_tokens), "stop"});
-    } else {
-        response.choices.emplace_back(ChatChoice{0, "", "stop"});
-    }
+    ChatChoice choice;
+    choice.message = completion_text;
+    response.choices.push_back(choice);
     response.stats = stats;
-    peak_memory_ = std::max(peak_memory_.load(), get_peak_memory());
 
     return response;
 }
 
-// ---------------------------------------------------------------------
-// Streaming generation (new sampler API)
-// ---------------------------------------------------------------------
 void InferenceEngine::chat_completion_stream(
     const ChatRequest& request,
     std::function<void(const std::string&, bool, bool, const InferenceStats&)> callback) {
-    if (!model_ || !ctx_ || !vocab_) {
-        std::cerr << "Model not loaded" << std::endl;
-        callback("", false, true, {});
-        return;
-    }
-
+    
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!is_loaded()) return;
 
-    // Clear KV cache per request
-    llama_kv_cache_clear(ctx_.get());
+    // Clear KV cache using modern seq_rm API
+    llama_kv_cache_seq_rm(ctx_.get(), -1, 0, -1);
 
-    std::string prompt = apply_chat_template(request.messages);
-    if (prompt.empty()) {
-        std::cerr << "Failed to apply chat template" << std::endl;
-        callback("", false, true, {});
-        return;
+    const auto* vocab = llama_model_get_vocab(model_.get());
+
+    std::string prompt = "";
+    for (const auto& msg : request.messages) {
+        prompt += msg.role + ": " + msg.content + "\n";
     }
+    prompt += "assistant: ";
 
-    auto tokens = tokenize(prompt, true);
-    if (tokens.empty()) {
-        std::cerr << "Tokenization failed" << std::endl;
-        callback("", false, true, {});
-        return;
+    std::vector<llama_token> tokens(prompt.size() + 3);
+    int n_tokens = llama_tokenize(vocab, prompt.data(), prompt.size(), tokens.data(), tokens.size(), true, true);
+    if (n_tokens < 0) {
+        tokens.resize(-n_tokens);
+        n_tokens = llama_tokenize(vocab, prompt.data(), prompt.size(), tokens.data(), tokens.size(), true, true);
     }
+    tokens.resize(n_tokens);
 
     InferenceStats stats;
-    stats.prompt_tokens = tokens.size();
+    stats.prompt_tokens = n_tokens;
 
-    auto start_total = std::chrono::steady_clock::now();
-    int n_past = 0;
-    llama_batch batch = build_batch(tokens, n_past, 0);
-    auto start_prompt = std::chrono::steady_clock::now();
+    llama_batch batch = llama_batch_get_one(tokens.data(), tokens.size());
     if (llama_decode(ctx_.get(), batch) != 0) {
-        std::cerr << "llama_decode failed" << std::endl;
-        llama_batch_free(batch);
-        callback("", false, true, {});
-        return;
-    }
-    auto end_prompt = std::chrono::steady_clock::now();
-    stats.prompt_processing_time = std::chrono::duration_cast<std::chrono::microseconds>(end_prompt - start_prompt);
-    n_past += tokens.size();
-    llama_batch_free(batch);
-
-    // ----- NEW: create sampler -----
-    llama_sampler* sampler = create_sampler(request.temperature, request.top_p);
-    if (!sampler) {
-        std::cerr << "Failed to create sampler" << std::endl;
-        callback("", false, true, {});
         return;
     }
 
-    bool first_token = true;
-    int remaining = request.max_tokens;
-    std::vector<char> buffer(16);
+    int generated = 0;
+    auto start_time = std::chrono::high_resolution_clock::now();
 
-    while (remaining-- > 0) {
-        llama_token id = llama_sampler_sample(sampler, ctx_.get(), -1, 0);
-        if (llama_vocab_is_eog(vocab_, id)) break;
+    while (generated < request.max_tokens) {
+        llama_token id = llama_sampler_sample(sampler_, ctx_.get(), -1);
 
-        // Convert token to string
-        int n = llama_token_to_piece(vocab_, id, buffer.data(), buffer.size(), 0, true);
-        if (n < 0) {
-            buffer.resize(-n + 1);
-            n = llama_token_to_piece(vocab_, id, buffer.data(), buffer.size(), 0, true);
-        }
-        std::string piece(buffer.data(), n);
-
-        if (first_token) {
-            stats.time_to_first_token = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - start_prompt);
-            callback(piece, true, false, stats);
-            first_token = false;
-        } else {
-            callback(piece, false, false, stats);
-        }
-
-        // Decode the new token
-        llama_batch single = llama_batch_init(1, 0, 1);
-        single.token[0] = id;
-        single.pos[0] = n_past;
-        single.seq_id[0][0] = 0;
-        single.n_seq_id[0] = 1;
-        single.logits[0] = true;
-        single.n_tokens = 1;
-
-        if (llama_decode(ctx_.get(), single) != 0) {
-            std::cerr << "llama_decode failed during streaming" << std::endl;
-            llama_batch_free(single);
+        bool is_eog = llama_vocab_is_eog(vocab, id);
+        if (is_eog) {
+            callback("", generated == 0, true, stats);
             break;
         }
-        n_past++;
-        llama_batch_free(single);
+
+        char buf[128];
+        int n = llama_token_to_piece(vocab, id, buf, sizeof(buf), 0, true);
+        std::string piece = "";
+        if (n > 0) {
+            piece = std::string(buf, n);
+        }
+
+        generated++;
+        stats.generated_tokens++;
+
+        auto current_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = current_time - start_time;
+        stats.total_time_ms = elapsed.count() * 1000.0;
+
+        callback(piece, generated == 1, false, stats);
+
+        batch = llama_batch_get_one(&id, 1);
+        if (llama_decode(ctx_.get(), batch) != 0) {
+            break;
+        }
     }
-
-    llama_sampler_free(sampler);
-
-    auto end_total = std::chrono::steady_clock::now();
-    stats.total_inference_time = std::chrono::duration_cast<std::chrono::microseconds>(end_total - start_total);
-    stats.generated_tokens = n_past - tokens.size();
-    peak_memory_ = std::max(peak_memory_.load(), get_peak_memory());
-
-    callback("", false, true, stats);
-}
-
-// ---------------------------------------------------------------------
-// Peak memory (Linux/Unix)
-// ---------------------------------------------------------------------
-size_t InferenceEngine::get_peak_memory() const {
-    struct rusage usage;
-    if (getrusage(RUSAGE_SELF, &usage) == 0) {
-        // On Linux, ru_maxrss is in kilobytes. Convert to bytes.
-        return static_cast<size_t>(usage.ru_maxrss) * 1024;
-    }
-    return 0;
 }
 
 } // namespace arm_ai
