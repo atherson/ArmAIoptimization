@@ -6,6 +6,7 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+#include <chrono>
 
 using json = nlohmann::json;
 
@@ -30,7 +31,7 @@ bool AIServer::start(const std::string& model_path, int port, int n_ctx, int n_t
     }
 
     // Load model
-    if (!engine_->load_model(model_path, n_ctx, 0, n_threads)) {
+    if (!engine_->load_model(model_path, n_ctx, n_threads, 0)) {
         std::cerr << "Failed to load model: " << model_path << std::endl;
         return false;
     }
@@ -46,7 +47,7 @@ bool AIServer::start(const std::string& model_path, int port, int n_ctx, int n_t
         server_->listen("0.0.0.0", port);
     });
 
-    // Wait a moment to ensure listen started (optional)
+    // Wait a moment to ensure listen started
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     return running_;
 }
@@ -63,7 +64,6 @@ void AIServer::stop() {
 
 // ---- Route setup ----
 void AIServer::setup_routes() {
-    // CORS headers will be set in each handler
     server_->Post("/v1/chat/completions", [this](const httplib::Request& req, httplib::Response& res) {
         handle_chat_completions(req, res);
     });
@@ -93,7 +93,7 @@ void AIServer::handle_chat_completions(const httplib::Request& req, httplib::Res
         } else {
             // Non‑streaming
             std::lock_guard<std::mutex> lock(engine_mutex_);
-            ChatResponse response = engine_->generate(request);
+            ChatResponse response = engine_->chat_completion(request);
             json resp_json = chat_response_to_json(response);
             res.set_content(resp_json.dump(), "application/json");
         }
@@ -142,43 +142,95 @@ ChatRequest AIServer::chat_request_from_json(const json& j) {
 
 json AIServer::chat_response_to_json(const ChatResponse& response) {
     json j;
-    j["id"] = "chatcmpl-" + std::to_string(response.id);
+    j["id"] = response.id;  // response.id is already a string
     j["object"] = "chat.completion";
-    j["created"] = response.created;
+    j["created"] = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch()
+                   ).count();
     j["model"] = response.model;
-    j["choices"] = {
-        {
-            {"index", 0},
-            {"message", {{"role", "assistant"}, {"content", response.content}}},
-            {"finish_reason", response.finish_reason}
-        }
-    };
+
+    // Assuming at least one choice
+    if (!response.choices.empty()) {
+        const auto& choice = response.choices[0];
+        j["choices"] = {
+            {
+                {"index", choice.index},
+                {"message", {{"role", "assistant"}, {"content", choice.message}}},
+                {"finish_reason", choice.finish_reason}
+            }
+        };
+    } else {
+        j["choices"] = json::array();
+    }
     return j;
 }
 
 // ---- SSE streaming ----
 void AIServer::send_sse_stream(httplib::Response& res, const ChatRequest& request) {
-    // We need a streaming generator from InferenceEngine.
-    // Assume engine_->generate_stream(request) returns a callback or yields tokens.
-    // For this implementation, we'll simulate streaming using a simple loop.
-    // You should replace with actual engine streaming.
+    // Use a content provider to stream data incrementally
+    // We'll capture a shared pointer to a stream that the callback writes to.
+    struct StreamState {
+        std::mutex mtx;
+        bool done = false;
+        std::string buffer;
+        httplib::Response* res;
+        std::condition_variable cv;
+    };
 
-    // For demonstration, we'll split a dummy response into tokens.
-    std::string dummy_text = "This is a streamed response from the server.";
-    std::istringstream iss(dummy_text);
-    std::string word;
-    while (iss >> word) {
-        json chunk = {{"token", word + " "}, {"finish", false}};
-        std::string sse = "data: " + chunk.dump() + "\n\n";
-        res.write(sse.c_str(), sse.size());
-        // In real streaming you'd wait for new tokens from engine.
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto state = std::make_shared<StreamState>();
+    state->res = &res;
+
+    // Set the content provider
+    res.set_content_provider(
+        "text/event-stream",
+        [state](size_t offset, httplib::DataSink& sink) {
+            std::unique_lock<std::mutex> lock(state->mtx);
+            // Wait until there is data or done
+            state->cv.wait(lock, [state]() {
+                return !state->buffer.empty() || state->done;
+            });
+            if (state->done && state->buffer.empty()) {
+                sink.done();
+                return true;
+            }
+            // Write the current buffer
+            sink.write(state->buffer.data(), state->buffer.size());
+            state->buffer.clear();
+            return true;
+        },
+        [state](bool success) {
+            // Cleanup if needed
+        }
+    );
+
+    // Now call the streaming generation
+    // We'll capture the state to push tokens as they arrive
+    engine_->chat_completion_stream(
+        request,
+        [state](const std::string& token, bool is_first, bool is_final, const InferenceStats& stats) {
+            std::lock_guard<std::mutex> lock(state->mtx);
+            json chunk;
+            if (is_final) {
+                chunk = {{"finish", true}};
+            } else {
+                chunk = {{"token", token}, {"finish", false}};
+            }
+            std::string sse = "data: " + chunk.dump() + "\n\n";
+            state->buffer += sse;
+            if (is_final) {
+                state->done = true;
+            }
+            state->cv.notify_one();
+        }
+    );
+
+    // Wait until streaming is done (the callback above will set done)
+    // The content provider will be called asynchronously.
+    // We need to block until done, but the callback might already have finished.
+    // We'll use a simple loop to wait.
+    while (!state->done) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    // Final chunk
-    json final_chunk = {{"finish", true}};
-    std::string final_sse = "data: " + final_chunk.dump() + "\n\n";
-    res.write(final_sse.c_str(), final_sse.size());
-    res.flush();
 }
 
 } // namespace arm_ai
