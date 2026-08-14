@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_compile_options(-O3 -flto)
 
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
-set(GGML_CPU_ARM_ARCH "armv9-a+i8mm+dotprod" CACHE STRING "" FORCE)
+set(GGML_CPU_ARM_ARCH "armv9-a+sve+i8mm+dotprod" CACHE STRING "" FORCE)
 set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
 
 set(GGML_CPU_AARCH64 ON CACHE BOOL "" FORCE)
@@ -62,6 +62,8 @@ FetchContent_MakeAvailable(googletest)
 add_executable(arm-ai-server
     src/main.cpp
     src/inference_engine.cpp
+    src/server.cpp
+    
 )
 
 target_include_directories(arm-ai-server PRIVATE
