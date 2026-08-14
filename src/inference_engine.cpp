@@ -9,8 +9,6 @@ bool InferenceEngine::load_model(const std::string& model_path, int n_ctx, int n
 
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = n_gpu_layers;
-    model_params.use_mmap = true;
-    model_params.use_mlock = false;
 
     model_.reset(llama_model_load_from_file(model_path.c_str(), model_params));  // <-- updated
     if (!model_) {
