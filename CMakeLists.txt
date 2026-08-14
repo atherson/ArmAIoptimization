@@ -12,9 +12,6 @@ add_compile_options(-O3 -flto)
 # Arm architecture optimisations (also applied to your own source)
 # -------------------------------------------------------------------
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-    # Use the same march that you set for GGML_CPU_ARM_ARCH, or a superset.
-    # The GGML_CPU_ARM_ARCH variable already passes -march to llama.cpp,
-    # but we want our own code (main, server, benchmark, tests) to benefit too.
     add_compile_options(-march=armv9-a+sve2 -mtune=cortex-a710)
 endif()
 
@@ -34,16 +31,15 @@ set(GGML_FMA OFF CACHE BOOL "" FORCE)
 set(GGML_F16C OFF CACHE BOOL "" FORCE)
 
 # -------------------------------------------------------------------
-# Fetch llama.cpp (pinned to a specific commit/release)
+# Fetch llama.cpp – use 'master' branch or a specific commit SHA
 # -------------------------------------------------------------------
 include(FetchContent)
 
 FetchContent_Declare(
     llama.cpp
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
-    # Pin to a stable version that includes the new sampler API (e.g., b3973)
-    # You can replace with a specific commit SHA if you prefer.
-    GIT_TAG b3973
+    # Use 'master' for latest, or replace with a fixed commit SHA (e.g., "9f3b9f1c7d3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c")
+    GIT_TAG master
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp
 )
 
@@ -103,8 +99,6 @@ target_link_libraries(arm-ai-server PRIVATE
     nlohmann_json::nlohmann_json
     pthread
 )
-
-# KleidiAI is already enabled via cache variables; no need to redefine.
 
 # -------------------------------------------------------------------
 # Benchmark executable
