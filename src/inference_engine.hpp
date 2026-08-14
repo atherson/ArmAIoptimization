@@ -87,11 +87,13 @@ private:
 
     llama_batch build_batch(const std::vector<llama_token>& tokens, int n_past, int seq_id);
 
-    llama_token sample_token(llama_sampler* sampler);
+    llama_token sample_token(llama_sampler* sampler);   // kept for compatibility
 
 private:
     std::unique_ptr<llama_model, decltype(&llama_model_free)> model_{nullptr, llama_model_free};
     std::unique_ptr<llama_context, decltype(&llama_free)> ctx_{nullptr, llama_free};
+
+    const llama_vocab* vocab_ = nullptr;   // <-- ADD THIS
 
     std::string model_name_;
     int n_ctx_ = 4096;
@@ -101,4 +103,4 @@ private:
     std::atomic<size_t> peak_memory_{0};
 };
 
-}
+} // namespace arm_ai
