@@ -212,16 +212,24 @@ This reads the model’s metadata and applies the correct template. Then rebuild
 ## Project Structure
 ```text
 ArmAIoptimization/
-├── CMakeLists.txt           # Build configuration with KleidiAI flags
-├── README.md                # This file
-├── setup_arm.sh             # Automated setup script for Ubuntu 24.04 Arm
+├── CMakeLists.txt             # Master build configuration (Server & Benchmark targets)
+├── LICENSE                    # Project license
+├── README.md                  # Main documentation
+├── setup_arm.sh               # Automated environment setup & build script
+├── cmake/
+│   └── armv9-toolchain.cmake  # Armv9 architectural flags (SVE2, KleidiAI micro-kernels)
+├── scripts/
+│   └── run_benchmarks.sh      # Automated CPU core-pinned profiling script
 ├── src/
-│   ├── main.cpp             # Server entry point
-│   ├── server.hpp/.cpp      # HTTP server and route handlers
-│   ├── inference_engine.hpp/.cpp  # Core inference using llama.h
-│   ├── benchmark.cpp        # Benchmarking utility
-│   └── test.cpp             # GoogleTest suite
-└── third_party/             # (auto‑created) Contains llama.cpp and other deps
+│   ├── benchmark.cpp          # Benchmarking CLI utility entry point
+│   ├── benchmark_helper.hpp   # Safe statistics utility (mean, percentile calculations)
+│   ├── inference_engine.cpp   # Core llama.cpp wrapper implementation
+│   ├── inference_engine.hpp   # Engine interface and memory telemetry structures
+│   ├── main.cpp               # HTTP AI server entry point & signal handling
+│   ├── server.cpp             # OpenAI-compatible API routes & SSE streaming
+│   ├── server.hpp             # httplib web server class declaration
+│   └── test.cpp               # GoogleTest unit test suite
+└── third_party/               # (Auto-created) Managed dependencies (llama.cpp)
 ```
 
 ## Architecture Overview
