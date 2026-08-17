@@ -191,20 +191,13 @@ configure_cmake() {
     )
 
     if [[ "$IS_ARM" == true ]]; then
-        print_info "Enabling KleidiAI optimisations for Armv9-A..."
+        print_info "Arm64 detected: Delegating to Armv9 toolchain file..."
+        # Point to the newly created toolchain file
         CMAKE_FLAGS+=(
-            -DGGML_NATIVE=OFF
-            -DGGML_CPU_ARM_ARCH="armv9-a+i8mm+dotprod"
-            -DGGML_CPU_KLEIDIAI=ON
-            -DGGML_CPU_AARCH64=ON
-            -DGGML_AVX=OFF
-            -DGGML_AVX2=OFF
-            -DGGML_AVX512=OFF
-            -DGGML_FMA=OFF
-            -DGGML_F16C=OFF
+            -DCMAKE_TOOLCHAIN_FILE="${SCRIPT_DIR}/cmake/armv9-toolchain.cmake"
         )
     else
-        print_info "Not on Arm — skipping KleidiAI flags."
+        print_info "Not on Arm — skipping KleidiAI toolchain."
         CMAKE_FLAGS+=(
             -DGGML_NATIVE=OFF
             -DGGML_AVX=OFF
@@ -224,7 +217,6 @@ configure_cmake() {
         print_info "compile_commands.json symlinked for LSP support."
     fi
 }
-
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
